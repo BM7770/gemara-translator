@@ -189,7 +189,34 @@ const OPTS={lang:[["pt","Português"],["en","English"],["es","Español"],["he","
 const S={lang:"pt",lvl:"all",qty:"30",mode:"lib",words:[],ctxText:""};
 const $=id=>document.getElementById(id);
 const LAB={pt:["Tradução","Aramaico"],en:["Translation","Aramaic"],es:["Traducción","Arameo"],he:["תרגום","ארמית"],fr:["Traduction","Araméen"],it:["Traduzione","Aramaico"],ru:["Перевод","Арамейский"]};
-let sample=null,dlcap=null;
+const GEMINI_WORKER="https://gemara-translator-api.18berale770.workers.dev/";
+async function fileToBase64(file){
+ return new Promise((resolve,reject)=>{
+  const reader=new FileReader();
+  reader.onload=()=>resolve(String(reader.result).split(",")[1]||"");
+  reader.onerror=()=>reject(new Error("Não foi possível ler o arquivo de imagem."));
+  reader.readAsDataURL(file);
+ });
+}
+async function askGemini(prompt,imageFile=null){
+ const payload={prompt};
+ if(imageFile){
+  payload.imageBase64=await fileToBase64(imageFile);
+  payload.mimeType=imageFile.type||"image/jpeg";
+ }
+ const response=await fetch(GEMINI_WORKER,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});
+ let data;
+ try{data=await response.json()}catch(_){throw new Error("O Worker retornou uma resposta inválida.")}
+ if(!response.ok){
+  const detail=data&&data.error?data.error:(data&&data.message?data.message:"Erro na API Gemini.");
+  throw new Error(detail);
+ }
+ if(data&&data.error)throw new Error(typeof data.error==="string"?data.error:(data.error.message||"Erro na API Gemini."));
+ const parts=data&&data.candidates&&data.candidates[0]&&data.candidates[0].content&&data.candidates[0].content.parts||[];
+ const text=parts.map(p=>p.text||"").join("\n").trim();
+ if(!text)throw new Error("O Gemini não retornou texto. Tente novamente.");
+ return {text};
+}
 
 document.querySelectorAll("[data-g]").forEach(g=>{const k=g.dataset.g;g.className="seg";OPTS[k].forEach(([v,t0],j)=>{const b=document.createElement("button");b.className="sb"+(S[k]==v?" on":"");b.textContent=lab(k,j);b.onclick=()=>{S[k]=v;g.querySelectorAll(".sb").forEach(c=>c.classList.toggle("on",c===b));moveInd(g);render()};g.appendChild(b)});g.appendChild(Object.assign(document.createElement("i"),{className:"ind"}))});
 function moveInd(g){const b=g.querySelector(".sb.on"),i=g.querySelector(".ind");if(!b||!i||!b.offsetWidth)return;i.style.left=b.offsetLeft+"px";i.style.top=b.offsetTop+"px";i.style.width=b.offsetWidth+"px";i.style.height=b.offsetHeight+"px"}
@@ -254,10 +281,10 @@ $("csvIn").onchange=async e=>{let n=0;for(const f of e.target.files){const o=csv
 $("upFile").onchange=async e=>{const f=e.target.files[0];if(!f)return;
  S.ref="";if(f.type=="application/pdf"){$("srcMsg").textContent="PDF ainda não é lido diretamente: exporte a página como JPG/PNG e envie novamente.";return}
  $("srcImg").src=URL.createObjectURL(f);$("srcImg").style.display="block";$("srcMsg").textContent="Lendo o texto da imagem…";
- try{sample=sample||await claude.use("sample");if(!sample)throw 0;
-  const r=await sample("Transcreva fielmente TODO o texto hebraico/aramaico desta página de Gemará, na ordem de leitura (direita→esquerda), com niqud se existir. Responda somente com o texto, sem comentários. Se houver trechos ilegíveis, omita-os.",{images:[f],cache:false});
-  $("txt").value=r.text.trim();$("srcMsg").textContent="Texto extraído. Confira e corrija antes de gerar.";}
- catch(err){$("srcMsg").textContent="Não foi possível ler a imagem (permissão negada ou recurso indisponível). Cole o texto manualmente.";}
+ try{
+  const r=await askGemini("Transcreva fielmente TODO o texto hebraico/aramaico desta página de Gemará, na ordem de leitura (direita→esquerda), com niqud se existir. Responda somente com o texto, sem comentários. Se houver trechos ilegíveis, omita-os.",f);
+  $("txt").value=r.text;$("srcMsg").textContent="Texto extraído. Confira e corrija antes de gerar.";}
+ catch(err){$("srcMsg").textContent="Não foi possível ler a imagem: "+(err&&err.message?err.message:"erro desconhecido")+". Cole o texto manualmente.";}
 };
 
 function pick(){
@@ -312,12 +339,12 @@ function parse(t){const a=t.indexOf("["),b=t.lastIndexOf("]");return JSON.parse(
 $("gen").onclick=async()=>{
  const text=$("txt").value.trim();if(!text){$("msg").textContent=t("m_need");return}
  $("gen").disabled=true;$("genT").textContent=t("proc");$("msg").textContent="";
- try{sample=sample||await claude.use("sample");if(!sample)throw {message:"Tradução indisponível neste ambiente."};
+ try{
   const mk=c=>`Você é um especialista em Talmud (Guemará), aramaico babilônico e hebraico rabínico. Do texto abaixo, identifique as palavras e expressões de vocabulário mais relevantes (máx. 100), SEM inventar palavras que não estejam no texto e sem incluir palavras triviais. Traduza segundo o sentido talmúdico tradicional NO CONTEXTO deste trecho (expressões completas como “תא שמע” como unidade). Se a tradução for incerta, marque unsure:true.
 Não inclua referências de fontes ou versículos (ex.: “Deuteronômio 17:11”) em nenhum campo: apenas a tradução e, quando útil, uma explicação curta sem citar fontes. Responda SOMENTE com um array JSON, em ordem de aparição, sem markdown. Cada item: {"ar":"palavra/expressão exatamente como no texto, sem niqud","tl":"transliteração latina","level":1|2|3 (1=básica/frequente, 2=intermediária, 3=difícil/contextual),"tr":{"pt":"...","en":"...","es":"...","he":"hebraico moderno simples","fr":"...","it":"...","ru":"..."},"alt":"outros sentidos possíveis (pt) ou vazio","note":"explicação contextual curta (pt) ou vazio","unsure":false}.
 TEXTO:
 ${c}`;
-  const rs=await Promise.all(chunks(text).map(c=>sample(mk(c),{modelTier:"complex",cache:false})));
+  const rs=await Promise.all(chunks(text).map(c=>askGemini(mk(c))));
   const seen=new Set();S.words=rs.flatMap(r=>parse(r.text)).filter(x=>x&&x.ar&&x.tr&&!seen.has(x.ar)&&seen.add(x.ar));S.ctxText=text.slice(0,260)+(text.length>260?"…":"");
   const meta={id:S.ref||"",when:new Date().toLocaleString("pt-BR"),lang:S.lang,lvl:S.lvl,qty:S.qty,n:S.words.length,text,words:S.words,ctx:S.ctxText,mode:S.mode};
   try{const h=JSON.parse(localStorage.getItem("gt_hist")||"[]");h.unshift(meta);localStorage.setItem("gt_hist",JSON.stringify(h.slice(0,30)))}catch(e){}
@@ -336,8 +363,13 @@ $("backBtn").onclick=()=>document.querySelector(".left").scrollIntoView({behavio
 ["dl","pr"].forEach(id=>$(id).addEventListener("click",()=>{$("segTools").querySelectorAll(".sb").forEach(b=>b.classList.toggle("on",b.id==id));moveInd($("segTools"))}));if(LIB[$("mas").value])loadRaw();
 $("dl").onclick=async()=>{
  const doc=sheetDoc(true);
- try{dlcap=dlcap||await claude.use("downloads");if(!dlcap)throw 0;await dlcap.save({filename:"vocabulario-gemara.html",data:new Blob([doc],{type:"text/html"})});$("msg").textContent="Arquivo salvo. Abra-o e use Imprimir → Salvar como PDF (A4)."}
- catch(e){$("msg").textContent="Para obter o PDF use “Print” e escolha Salvar como PDF (A4, sem margens)."}
+ try{
+  const blob=new Blob([doc],{type:"text/html;charset=utf-8"});
+  const url=URL.createObjectURL(blob),a=document.createElement("a");
+  a.href=url;a.download="vocabulario-gemara.html";document.body.appendChild(a);a.click();a.remove();
+  setTimeout(()=>URL.revokeObjectURL(url),1000);
+  $("msg").textContent="Arquivo baixado. Abra-o e use Imprimir → Salvar como PDF (A4).";
+ }catch(e){$("msg").textContent="Para obter o PDF use “Print” e escolha Salvar como PDF (A4, sem margens)."}
 };
 render();
 </script>
