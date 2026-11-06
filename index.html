@@ -206,15 +206,25 @@ async function askGemini(prompt,imageFile=null){
  }
  const response=await fetch(GEMINI_WORKER,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});
  let data;
- try{data=await response.json()}catch(_){throw new Error("O Worker retornou uma resposta inválida.")}
- if(!response.ok){
-  const detail=data&&data.error?data.error:(data&&data.message?data.message:"Erro na API Gemini.");
-  throw new Error(detail);
- }
- if(data&&data.error)throw new Error(typeof data.error==="string"?data.error:(data.error.message||"Erro na API Gemini."));
- const parts=data&&data.candidates&&data.candidates[0]&&data.candidates[0].content&&data.candidates[0].content.parts||[];
+ try{data=await response.json()}catch(_){throw new Error("O Worker retornou uma resposta inválida (HTTP "+response.status+").")}
+ const describeError=value=>{
+  if(typeof value==="string")return value;
+  if(value&&typeof value==="object"){
+   if(value.message)return String(value.message)+(value.status?" ("+value.status+")":"");
+   try{return JSON.stringify(value)}catch(_){return "Erro desconhecido da API."}
+  }
+  return "Erro na API Gemini.";
+ };
+ if(!response.ok)throw new Error(describeError(data&&data.error?data.error:data&&data.message?data.message:data)+" [HTTP "+response.status+"]");
+ if(data&&data.error)throw new Error(describeError(data.error));
+ const candidate=data&&data.candidates&&data.candidates[0];
+ const parts=candidate&&candidate.content&&candidate.content.parts||[];
  const text=parts.map(p=>p.text||"").join("\n").trim();
- if(!text)throw new Error("O Gemini não retornou texto. Tente novamente.");
+ if(!text){
+  const reason=candidate&&candidate.finishReason;
+  const feedback=data&&data.promptFeedback&&data.promptFeedback.blockReason;
+  throw new Error(feedback?"O Gemini bloqueou a solicitação: "+feedback:reason?"O Gemini não gerou texto. Motivo: "+reason:"O Gemini não retornou texto. Resposta: "+JSON.stringify(data).slice(0,700));
+ }
  return {text};
 }
 
@@ -334,7 +344,7 @@ function fit(){const st=$("stage"),sh=$("sheets");sh.style.transform="none";cons
  const k=Math.min(1,st.clientWidth/pw.offsetWidth);sh.style.transform=`scale(${k})`;st.style.height=(sh.offsetHeight*k)+"px"}
 addEventListener("resize",()=>{fit();segs()});if(document.fonts)document.fonts.ready.then(()=>{segs();render()});addEventListener("load",segs);
 
-function chunks(t,n=5500){const out=[];while(t.length>n){let k=t.lastIndexOf(" ",n);if(k<n/2)k=n;out.push(t.slice(0,k));t=t.slice(k)}out.push(t);return out}
+function chunks(t,n=2200){const out=[];while(t.length>n){let k=t.lastIndexOf(" ",n);if(k<n/2)k=n;out.push(t.slice(0,k));t=t.slice(k)}out.push(t);return out}
 function parse(t){const a=t.indexOf("["),b=t.lastIndexOf("]");return JSON.parse(t.slice(a,b+1))}
 $("gen").onclick=async()=>{
  const text=$("txt").value.trim();if(!text){$("msg").textContent=t("m_need");return}
@@ -344,7 +354,10 @@ $("gen").onclick=async()=>{
 Não inclua referências de fontes ou versículos (ex.: “Deuteronômio 17:11”) em nenhum campo: apenas a tradução e, quando útil, uma explicação curta sem citar fontes. Responda SOMENTE com um array JSON, em ordem de aparição, sem markdown. Cada item: {"ar":"palavra/expressão exatamente como no texto, sem niqud","tl":"transliteração latina","level":1|2|3 (1=básica/frequente, 2=intermediária, 3=difícil/contextual),"tr":{"pt":"...","en":"...","es":"...","he":"hebraico moderno simples","fr":"...","it":"...","ru":"..."},"alt":"outros sentidos possíveis (pt) ou vazio","note":"explicação contextual curta (pt) ou vazio","unsure":false}.
 TEXTO:
 ${c}`;
-  const rs=await Promise.all(chunks(text).map(c=>askGemini(mk(c))));
+  const rs=[];
+  for(const c of chunks(text)){
+   rs.push(await askGemini(mk(c)));
+  }
   const seen=new Set();S.words=rs.flatMap(r=>parse(r.text)).filter(x=>x&&x.ar&&x.tr&&!seen.has(x.ar)&&seen.add(x.ar));S.ctxText=text.slice(0,260)+(text.length>260?"…":"");
   const meta={id:S.ref||"",when:new Date().toLocaleString("pt-BR"),lang:S.lang,lvl:S.lvl,qty:S.qty,n:S.words.length,text,words:S.words,ctx:S.ctxText,mode:S.mode};
   try{const h=JSON.parse(localStorage.getItem("gt_hist")||"[]");h.unshift(meta);localStorage.setItem("gt_hist",JSON.stringify(h.slice(0,30)))}catch(e){}
